@@ -11,6 +11,8 @@ const assets = [
   ['tesseract.js-core', 'tesseract-core-lstm.wasm'],
   ['tesseract.js-core', 'tesseract-core-simd-lstm.wasm.js'],
   ['tesseract.js-core', 'tesseract-core-simd-lstm.wasm'],
+  ['tesseract.js-core', 'tesseract-core-relaxedsimd-lstm.wasm.js'],
+  ['tesseract.js-core', 'tesseract-core-relaxedsimd-lstm.wasm'],
 ]
 
 for (const [packageName, file] of assets) {

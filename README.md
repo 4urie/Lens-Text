@@ -1,32 +1,48 @@
-# React + TypeScript + Vite
+# Lens Text
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Lens Text turns text in a PNG, JPG, JPEG, or WebP image into editable text. Drop an image, choose a file, or paste a screenshot with **Ctrl+V**. Select **Extract Text**, edit the result if needed, and select **Copy Text**.
 
-Currently, two official plugins are available:
+OCR runs in your browser or in the Electron window. Images are not sent to a server. The English language data, OCR worker, and WebAssembly engine are included with the project, so OCR needs no runtime download after the app is built. Recognition is currently English only.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Run the web app
 
-## React Compiler
+Open PowerShell in the `lens-text` folder and run:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```powershell
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Open the local URL Vite prints, normally `http://localhost:5173`.
+
+## Run the Windows desktop app
+
+For desktop development with automatic React updates:
+
+```powershell
+npm run dev:desktop
+```
+
+To build and launch the production desktop app:
+
+```powershell
+npm run desktop
+```
+
+To make a Windows installer:
+
+```powershell
+npm run dist:win
+```
+
+The installer is created at `release/Lens Text Setup 1.0.0.exe`. The unpacked app is in `release/win-unpacked`.
+
+## Checks
+
+```powershell
+npm run lint
+npm run build
+```
+
+`src/App.tsx` contains image input, OCR, clipboard, and result handling. `src/App.css` and `src/index.css` contain the responsive light and dark styles. `electron/main.cjs` opens the built site in a sandboxed Electron window. `scripts/copy-ocr-assets.cjs` copies the OCR engine files from installed dependencies into `public/ocr` before development or builds. `public/ocr/eng.traineddata.gz` is the bundled English model.
+
+The English model comes from the [Tesseract.js English data package](https://www.npmjs.com/package/@tesseract.js-data/eng). To add another language, include its trained data and update the worker language in `src/App.tsx`.
