@@ -1,7 +1,7 @@
 {
   "name": "lens-text",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Private, local image-to-text extraction for web and Windows",
   "main": "electron/main.cjs",
   "type": "module",
@@ -40,9 +40,23 @@
     "appId": "com.lenstext.app",
     "productName": "Lens Text",
     "electronDist": "node_modules/electron/dist",
-    "directories": { "output": "release" },
-    "files": ["dist/**/*", "electron/**/*", "package.json"],
-    "win": { "target": ["nsis"], "icon": "electron/icon.ico" },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "electron/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

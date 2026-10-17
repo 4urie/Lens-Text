@@ -1,0 +1,12 @@
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; font-family: system-ui, "Segoe UI", sans-serif; }
+#snip-surface { position: fixed; inset: 0; cursor: crosshair; user-select: none; touch-action: none; background: #15121f; }
+#screen-image { position: absolute; width: 100%; height: 100%; pointer-events: none; }
+#shade { position: absolute; inset: 0; background: rgba(15, 11, 28, .37); pointer-events: none; }
+#selection { position: absolute; border: 2px solid #fff; outline: 1px solid #7551d8; box-shadow: 0 0 0 9999px rgba(15, 11, 28, .37), 0 0 0 2px #7551d8; pointer-events: none; }
+#selection[hidden] { display: none; }
+#shade.selecting { display: none; }
+#toolbar { position: absolute; z-index: 2; top: 18px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 17px; max-width: calc(100% - 24px); padding: 8px 9px 8px 16px; border: 1px solid #ffffff30; border-radius: 11px; background: #211b31e8; color: white; box-shadow: 0 8px 30px #0005; white-space: nowrap; font-size: 13px; }
+#toolbar button { border: 0; border-radius: 7px; padding: 7px 10px; background: #ffffff24; color: white; font: inherit; font-size: 12px; cursor: pointer; }
+#toolbar button:hover { background: #ffffff40; }
+#status { position: absolute; z-index: 2; left: 50%; bottom: 18px; transform: translateX(-50%); min-height: 22px; color: white; text-shadow: 0 1px 5px #000; font-size: 13px; text-align: center; pointer-events: none; }

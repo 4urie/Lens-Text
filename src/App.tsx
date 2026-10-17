@@ -2,13 +2,23 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createWorker, type Worker as OcrWorker } from 'tesseract.js'
 import './App.css'
 
-type Status = 'idle' | 'working' | 'success' | 'empty' | 'error'
+type ItemStatus = 'pending' | 'processing' | 'success' | 'empty' | 'error'
+type ImageItem = {
+  id: number
+  file: File
+  url: string
+  text: string
+  status: ItemStatus
+  progress: number
+  error?: string
+}
+
 const supported = new Set(['image/png', 'image/jpeg', 'image/webp'])
 const ocrAssets = new URL(`${import.meta.env.BASE_URL}ocr/`, window.location.href).href.replace(/\/$/, '')
 
-function Icon({ name }: { name: 'scan' | 'upload' | 'paste' | 'copy' | 'trash' | 'sun' | 'moon' | 'image' | 'check' | 'arrow' }) {
+function Icon({ name }: { name: 'scan' | 'upload' | 'paste' | 'copy' | 'trash' | 'sun' | 'moon' | 'image' | 'check' | 'arrow' | 'close' }) {
   const paths = {
-    scan: <><path d="M4 9V6a2 2 0 0 1 2-2h3m6 0h3a2 2 0 0 1 2 2v3m0 6v3a2 2 0 0 1-2 2h-3m-6 0H6a2 2 0 0 1-2-2v-3M7 12h10M7 15h7"/></>,
+    scan: <path d="M4 9V6a2 2 0 0 1 2-2h3m6 0h3a2 2 0 0 1 2 2v3m0 6v3a2 2 0 0 1-2 2h-3m-6 0H6a2 2 0 0 1-2-2v-3M7 12h10M7 15h7"/>,
     upload: <path d="M12 16V4m0 0L8 8m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>,
     paste: <><rect x="6" y="5" width="14" height="16" rx="2"/><path d="M9 5V3h8v2M9 10h8m-8 4h6M4 9H3v10a2 2 0 0 0 2 2"/></>,
     copy: <><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
@@ -18,6 +28,7 @@ function Icon({ name }: { name: 'scan' | 'upload' | 'paste' | 'copy' | 'trash' |
     image: <><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m3 17 5-5 4 4 3-3 6 6"/></>,
     check: <path d="m5 12 4 4L19 6"/>,
     arrow: <path d="M5 12h14m-6-6 6 6-6 6"/>,
+    close: <path d="M5 5 19 19M19 5 5 19"/>,
   }
   return <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
@@ -27,19 +38,29 @@ function App() {
     const saved = localStorage.getItem('lens-text-theme')
     return saved === 'light' || saved === 'dark' ? saved : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
   })
-  const [image, setImage] = useState<{ file: File; url: string } | null>(null)
-  const [text, setText] = useState('')
-  const [status, setStatus] = useState<Status>('idle')
-  const [message, setMessage] = useState('Your extracted text will appear here.')
-  const [progress, setProgress] = useState(0)
+  const [items, setItems] = useState<ImageItem[]>([])
+  const itemsRef = useRef<ImageItem[]>([])
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [processing, setProcessing] = useState(false)
   const [dragging, setDragging] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [shortcutAvailable, setShortcutAvailable] = useState(false)
+  const [notice, setNotice] = useState('Add images to start extracting text.')
+  const [copied, setCopied] = useState<'single' | 'all' | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
-  const textArea = useRef<HTMLTextAreaElement>(null)
-  const previewUrl = useRef<string | null>(null)
   const workerRef = useRef<OcrWorker | null>(null)
   const runId = useRef(0)
+  const nextId = useRef(1)
+  const autoSnipIds = useRef<number[]>([])
   const mounted = useRef(true)
+
+  const commitItems = useCallback((next: ImageItem[]) => {
+    itemsRef.current = next
+    setItems(next)
+  }, [])
+
+  const updateItem = useCallback((id: number, change: Partial<ImageItem>) => {
+    commitItems(itemsRef.current.map((item) => item.id === id ? { ...item, ...change } : item))
+  }, [commitItems])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -51,8 +72,8 @@ function App() {
     return () => {
       mounted.current = false
       runId.current += 1
-      if (previewUrl.current) URL.revokeObjectURL(previewUrl.current)
-      void workerRef.current?.terminate()
+      itemsRef.current.forEach((item) => URL.revokeObjectURL(item.url))
+      void workerRef.current?.terminate().catch(() => {})
     }
   }, [])
 
@@ -61,31 +82,66 @@ function App() {
     const worker = workerRef.current
     workerRef.current = null
     if (worker) void worker.terminate().catch(() => {})
-  }, [])
+    commitItems(itemsRef.current.map((item) => item.status === 'processing' ? { ...item, status: 'pending', progress: 0 } : item))
+    setProcessing(false)
+  }, [commitItems])
 
-  const loadImage = useCallback((file: File) => {
-    if (!supported.has(file.type)) {
-      setMessage('Choose a PNG, JPG, JPEG, or WebP image.')
-      setStatus('error')
-      return
+  const addImages = useCallback((files: File[]) => {
+    const valid = files.filter((file) => supported.has(file.type))
+    const rejected = files.length - valid.length
+    if (!valid.length) {
+      setNotice('Choose PNG, JPG, JPEG, or WebP images.')
+      return []
     }
-    stopOcr()
-    if (previewUrl.current) URL.revokeObjectURL(previewUrl.current)
-    const url = URL.createObjectURL(file)
-    previewUrl.current = url
-    setImage({ file, url })
-    setText('')
-    setProgress(0)
-    setCopied(false)
-    setStatus('idle')
-    setMessage('Image ready. Select Extract Text to begin.')
-  }, [stopOcr])
+    const added = valid.map((file): ImageItem => ({
+      id: nextId.current++,
+      file,
+      url: URL.createObjectURL(file),
+      text: '',
+      status: 'pending',
+      progress: 0,
+    }))
+    commitItems([...itemsRef.current, ...added])
+    setSelectedId((previous) => previous ?? added[0].id)
+    setCopied(null)
+    setNotice(`${added.length} image${added.length === 1 ? '' : 's'} added.${rejected ? ` ${rejected} unsupported file${rejected === 1 ? ' was' : 's were'} skipped.` : ''} Select Extract All to begin.`)
+    return added.map((item) => item.id)
+  }, [commitItems])
+
+  useEffect(() => {
+    const desktop = window.lensTextDesktop
+    if (!desktop) return
+    void desktop.shortcutStatus().then(setShortcutAvailable).catch(() => setShortcutAvailable(false))
+    const offCapture = desktop.onCapture((base64) => {
+      try {
+        const binary = atob(base64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+        const file = new File([bytes.buffer], `Screen snip ${nextId.current}.png`, { type: 'image/png' })
+        const ids = addImages([file])
+        if (ids.length) {
+          autoSnipIds.current.push(...ids)
+          setSelectedId(ids[0])
+          setNotice('Screen area captured. Extracting text...')
+        }
+      } catch {
+        setNotice('Could not read the screen snip. Please try again.')
+      }
+    })
+    const offError = desktop.onError((message) => setNotice(message))
+    return () => { offCapture(); offError() }
+  }, [addImages])
 
   useEffect(() => {
     const onPaste = (event: ClipboardEvent) => {
-      const item = Array.from(event.clipboardData?.items ?? []).find((entry) => supported.has(entry.type))
-      const file = item?.getAsFile()
-      if (file) { event.preventDefault(); loadImage(file) }
+      const files = Array.from(event.clipboardData?.items ?? [])
+        .filter((entry) => supported.has(entry.type))
+        .map((entry) => entry.getAsFile())
+        .filter((file): file is File => file !== null)
+      if (files.length) {
+        event.preventDefault()
+        addImages(files)
+      }
     }
     const onDragOver = (event: DragEvent) => { if (event.dataTransfer?.types.includes('Files')) event.preventDefault() }
     const onDrop = (event: DragEvent) => { if (event.dataTransfer?.types.includes('Files')) event.preventDefault() }
@@ -97,116 +153,163 @@ function App() {
       window.removeEventListener('dragover', onDragOver)
       window.removeEventListener('drop', onDrop)
     }
-  }, [loadImage])
+  }, [addImages])
 
-  const pasteImage = async () => {
+  const pasteImages = async () => {
     if (!navigator.clipboard?.read) {
-      setStatus('error')
-      setMessage('Clipboard image access is unavailable here. Try Ctrl+V or upload an image.')
+      setNotice('Clipboard image access is unavailable. Try Ctrl+V or upload images.')
       return
     }
     try {
-      const items = await navigator.clipboard.read()
-      for (const item of items) {
+      const clipboardItems = await navigator.clipboard.read()
+      const files: File[] = []
+      for (const item of clipboardItems) {
         const type = item.types.find((value) => supported.has(value))
-        if (type) {
-          const blob = await item.getType(type)
-          loadImage(new File([blob], 'Pasted image', { type }))
-          return
-        }
+        if (type) files.push(new File([await item.getType(type)], `Pasted image ${nextId.current + files.length}.png`, { type }))
       }
-      setStatus('error')
-      setMessage('No supported image is on the clipboard. Copy a screenshot, then try again.')
+      if (files.length) addImages(files)
+      else setNotice('No supported image is on the clipboard. Copy a screenshot, then try again.')
     } catch {
-      setStatus('error')
-      setMessage('Clipboard access was blocked. Press Ctrl+V or upload an image instead.')
+      setNotice('Clipboard access was blocked. Press Ctrl+V or upload images instead.')
     }
   }
 
-  const clear = () => {
+  const startScreenSnip = async () => {
+    const result = await window.lensTextDesktop?.startSnip()
+    if (result && !result.ok) setNotice(result.error ?? 'Screen snip could not start.')
+  }
+
+  const removeItem = (id: number) => {
+    const target = itemsRef.current.find((item) => item.id === id)
+    if (!target) return
+    if (target.status === 'processing') stopOcr()
+    URL.revokeObjectURL(target.url)
+    const next = itemsRef.current.filter((item) => item.id !== id)
+    commitItems(next)
+    if (selectedId === id) setSelectedId(next[0]?.id ?? null)
+    setCopied(null)
+    setNotice(next.length ? 'Image removed.' : 'Add images to start extracting text.')
+  }
+
+  const clearAll = () => {
     stopOcr()
-    if (previewUrl.current) URL.revokeObjectURL(previewUrl.current)
-    previewUrl.current = null
-    setImage(null)
-    setText('')
-    setProgress(0)
-    setCopied(false)
-    setStatus('idle')
-    setMessage('Your extracted text will appear here.')
+    itemsRef.current.forEach((item) => URL.revokeObjectURL(item.url))
+    commitItems([])
+    setSelectedId(null)
+    setCopied(null)
+    setNotice('Add images to start extracting text.')
     if (fileInput.current) fileInput.current.value = ''
   }
 
-  const extract = async () => {
-    if (!image || status === 'working') return
-    stopOcr()
-    const thisRun = runId.current
-    setProgress(0)
-    setText('')
-    setCopied(false)
-    setStatus('working')
-    setMessage('Preparing the OCR engine…')
+  const extractAll = useCallback(async (onlyIds?: number[]) => {
+    if (processing) return
+    const queue = itemsRef.current.filter((item) => (item.status === 'pending' || item.status === 'error') && (!onlyIds || onlyIds.includes(item.id)))
+    if (!queue.length) return
+    const thisRun = ++runId.current
+    setProcessing(true)
+    setCopied(null)
+    setNotice(`Preparing OCR for ${queue.length} image${queue.length === 1 ? '' : 's'}...`)
     let worker: OcrWorker | null = null
+    let activeId: number | null = null
+    let done = 0
     try {
       worker = await createWorker('eng', 1, {
         workerPath: `${ocrAssets}/worker.min.js`,
         corePath: ocrAssets,
         langPath: ocrAssets,
         workerBlobURL: false,
-        logger: ({ status: step, progress: value }) => {
-          if (mounted.current && runId.current === thisRun) {
-            setMessage(step === 'recognizing text' ? 'Reading text from your image…' : 'Preparing the OCR engine…')
-            setProgress(Math.round(Math.max(0, Math.min(1, value)) * 100))
+        logger: ({ status, progress }) => {
+          if (mounted.current && runId.current === thisRun && activeId !== null && status === 'recognizing text') {
+            updateItem(activeId, { progress: Math.round(Math.max(0, Math.min(1, progress)) * 100) })
           }
         },
       })
-      if (!mounted.current || runId.current !== thisRun) { await worker.terminate(); return }
-      workerRef.current = worker
-      const result = await worker.recognize(image.file)
       if (!mounted.current || runId.current !== thisRun) return
-      const extracted = result.data.text.trim()
-      setText(extracted)
-      setProgress(100)
-      setStatus(extracted ? 'success' : 'empty')
-      setMessage(extracted ? 'Text extracted. You can edit it below before copying.' : 'No text found. Try a sharper image with larger, clearer text.')
+      workerRef.current = worker
+      for (const queued of queue) {
+        if (!mounted.current || runId.current !== thisRun) break
+        if (!itemsRef.current.some((item) => item.id === queued.id)) continue
+        activeId = queued.id
+        setSelectedId(queued.id)
+        updateItem(queued.id, { status: 'processing', progress: 0, error: undefined })
+        setNotice(`Reading image ${done + 1} of ${queue.length}: ${queued.file.name}`)
+        try {
+          const result = await worker.recognize(queued.file)
+          if (!mounted.current || runId.current !== thisRun) break
+          const extracted = result.data.text.trim()
+          updateItem(queued.id, { text: extracted, status: extracted ? 'success' : 'empty', progress: 100 })
+        } catch (error) {
+          if (!mounted.current || runId.current !== thisRun) break
+          console.error(`OCR failed for ${queued.file.name}:`, error)
+          updateItem(queued.id, { status: 'error', progress: 0, error: 'Text extraction failed. Select Retry to try this image again.' })
+        }
+        done += 1
+      }
+      if (mounted.current && runId.current === thisRun) {
+        const failures = itemsRef.current.filter((item) => item.status === 'error').length
+        setNotice(`Finished ${done} image${done === 1 ? '' : 's'}.${failures ? ` ${failures} need${failures === 1 ? 's' : ''} another try.` : ''}`)
+      }
     } catch (error) {
       if (mounted.current && runId.current === thisRun) {
-        console.error('OCR failed:', error)
-        setStatus('error')
-        setMessage('Text extraction failed. Try another image or run it again.')
+        console.error('OCR engine failed:', error)
+        const queuedIds = new Set(queue.map((item) => item.id))
+        commitItems(itemsRef.current.map((item) => queuedIds.has(item.id) && item.status === 'pending'
+          ? { ...item, status: 'error', error: 'OCR could not start. Select Retry after checking the app files.' }
+          : item))
+        setNotice('The OCR engine could not start. Try again.')
       }
     } finally {
+      activeId = null
       if (worker) {
         if (workerRef.current === worker) workerRef.current = null
         try { await worker.terminate() } catch { /* Clear may already have stopped it. */ }
       }
+      if (mounted.current && runId.current === thisRun) setProcessing(false)
     }
+  }, [processing, updateItem, commitItems])
+
+  useEffect(() => {
+    if (processing || !autoSnipIds.current.length) return
+    const ids = autoSnipIds.current.splice(0)
+    if (ids.some((id) => itemsRef.current.some((item) => item.id === id && item.status === 'pending'))) {
+      void extractAll(ids)
+    }
+  }, [items, processing, extractAll])
+
+  const retrySelected = () => {
+    if (!selectedId || processing) return
+    updateItem(selectedId, { status: 'pending', progress: 0, error: undefined })
+    void extractAll([selectedId])
   }
 
-  const copyText = async () => {
-    if (!text) return
+  const copyValue = async (value: string, kind: 'single' | 'all') => {
+    if (!value) return
     try {
-      await navigator.clipboard.writeText(text)
+      await navigator.clipboard.writeText(value)
     } catch {
-      try {
-        textArea.current?.focus()
-        textArea.current?.select()
-        if (!document.execCommand('copy')) throw new Error('Copy failed')
-      } catch {
-        setMessage('Copy was blocked. Select the text and press Ctrl+C instead.')
+      const helper = document.createElement('textarea')
+      helper.value = value
+      helper.style.position = 'fixed'
+      helper.style.opacity = '0'
+      document.body.appendChild(helper)
+      helper.select()
+      let worked = false
+      try { worked = document.execCommand('copy') } catch { /* Browser denied the fallback. */ }
+      helper.remove()
+      if (!worked) {
+        setNotice('Copy was blocked. Select the text and press Ctrl+C instead.')
         return
       }
     }
-    setCopied(true)
-    setMessage('Text copied to your clipboard.')
-    window.setTimeout(() => setCopied(false), 2200)
+    setCopied(kind)
+    setNotice(kind === 'all' ? 'All extracted text copied.' : 'Text copied to your clipboard.')
+    window.setTimeout(() => setCopied((current) => current === kind ? null : current), 2200)
   }
 
-  const onDrop = (event: React.DragEvent<HTMLElement>) => {
-    event.preventDefault()
-    setDragging(false)
-    const file = event.dataTransfer.files[0]
-    if (file) loadImage(file)
-  }
+  const selected = items.find((item) => item.id === selectedId) ?? null
+  const pendingCount = items.filter((item) => item.status === 'pending' || item.status === 'error').length
+  const completeCount = items.filter((item) => item.status === 'success' || item.status === 'empty').length
+  const combinedText = items.filter((item) => item.text.trim()).map((item) => `${item.file.name}\n${item.text.trim()}`).join('\n\n')
 
   return <div className="app-shell">
     <header className="topbar">
@@ -217,25 +320,36 @@ function App() {
       <section className="intro"><div className="eyebrow"><span className="eyebrow-line"/> SIMPLE IMAGE TO TEXT</div><h1>See text. <span>Copy it.</span></h1><p>Turn screenshots, photos, and documents into editable text in a few clicks.</p></section>
       <div className="workspace">
         <section className="panel source-panel" aria-labelledby="source-title">
-          <div className="panel-heading"><div><span className="step">01</span><h2 id="source-title">Source image</h2></div><span className="panel-hint">PNG, JPG, WebP</span></div>
-          <input ref={fileInput} className="sr-only" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) loadImage(file) }} aria-label="Choose an image" />
-          <div className={`drop-zone ${dragging ? 'dragging' : ''} ${image ? 'has-image' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true) }} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={(event) => { event.preventDefault(); if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }} onDrop={onDrop}>
-            {image ? <img src={image.url} className="preview" alt="Selected source for text extraction" onError={() => { setStatus('error'); setMessage('This image could not be opened. Try another file.') }} /> : <div className="empty-upload"><div className="upload-icon"><Icon name="image"/></div><h3>Drop your image here</h3><p>or choose a file to get started</p><button className="secondary-button choose-button" type="button" onClick={() => fileInput.current?.click()}><Icon name="upload"/> Browse files</button></div>}
-            {dragging && <div className="drop-overlay">Drop image here</div>}
+          <div className="panel-heading"><div><span className="step">01</span><h2 id="source-title">Source images</h2></div><span className="panel-hint">PNG, JPG, WebP</span></div>
+          <input ref={fileInput} className="sr-only" type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(event) => { addImages(Array.from(event.target.files ?? [])); event.target.value = '' }} aria-label="Choose images" />
+          <div className={`drop-zone ${dragging ? 'dragging' : ''} ${selected ? 'has-image' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true) }} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={(event) => { event.preventDefault(); if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }} onDrop={(event) => { event.preventDefault(); setDragging(false); addImages(Array.from(event.dataTransfer.files)) }}>
+            {selected ? <img src={selected.url} className="preview" alt={`Preview of ${selected.file.name}`} onError={() => updateItem(selected.id, { status: 'error', error: 'This image could not be opened. Remove it and try another file.' })} /> : <div className="empty-upload"><div className="upload-icon"><Icon name="image"/></div><h3>Drop your images here</h3><p>or choose files to get started</p><button className="secondary-button choose-button" type="button" onClick={() => fileInput.current?.click()}><Icon name="upload"/> Browse files</button></div>}
+            {dragging && <div className="drop-overlay">Drop images here</div>}
           </div>
-          {image && <div className="file-row"><span className="file-name" title={image.file.name}>{image.file.name}</span><button className="text-button" type="button" onClick={() => fileInput.current?.click()}>Change image</button></div>}
-          <div className="source-actions"><button className="secondary-button" type="button" onClick={() => fileInput.current?.click()}><Icon name="upload"/> Upload image</button><button className="secondary-button" type="button" onClick={pasteImage}><Icon name="paste"/> Paste image</button></div>
-          <p className="shortcut-note">Tip: Copy a screenshot and press <kbd>Ctrl</kbd> + <kbd>V</kbd> anywhere on this page.</p>
-          <button className="primary-button" type="button" onClick={extract} disabled={!image || status === 'working'}>{status === 'working' ? <><span className="spinner"/> Extracting… {progress}%</> : <><Icon name="scan"/> Extract Text <Icon name="arrow"/></>}</button>
+          <div className="source-actions"><button className="secondary-button" type="button" onClick={() => fileInput.current?.click()}><Icon name="upload"/> Add images</button><button className="secondary-button" type="button" onClick={pasteImages}><Icon name="paste"/> Paste image</button>{window.lensTextDesktop && <button className="secondary-button snip-button" type="button" onClick={() => { void startScreenSnip() }}><Icon name="scan"/> Screen Snip</button>}</div>
+          <p className="shortcut-note">{window.lensTextDesktop ? <>Select an area with Screen Snip{shortcutAvailable ? <> or press <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> anywhere.</> : <>. The global shortcut may be in use by another app.</>}</> : <>Tip: Select several files at once, drop a group, or press <kbd>Ctrl</kbd> + <kbd>V</kbd> to add a screenshot.</>}</p>
+          {items.length > 0 && <div className="image-list" aria-label="Images to extract">
+            <div className="list-heading"><strong>{items.length} image{items.length === 1 ? '' : 's'}</strong><span>{completeCount} completed</span></div>
+            {items.map((item, index) => <div className={`image-row ${selectedId === item.id ? 'selected' : ''}`} key={item.id}>
+              <button type="button" className="image-select" onClick={() => setSelectedId(item.id)} aria-label={`View result for ${item.file.name}`} aria-current={selectedId === item.id ? 'true' : undefined}>
+                <img src={item.url} alt="" />
+                <span className="image-row-info"><span className="file-name" title={item.file.name}>{index + 1}. {item.file.name}</span><span className={`row-status status-${item.status}`}>{item.status === 'processing' ? `Reading ${item.progress}%` : item.status === 'success' ? 'Done' : item.status === 'empty' ? 'No text' : item.status === 'error' ? 'Error' : 'Queued'}</span></span>
+              </button>
+              <button className="remove-button" type="button" onClick={() => removeItem(item.id)} aria-label={`Remove ${item.file.name}`} title="Remove image"><Icon name="close"/></button>
+            </div>)}
+          </div>}
+          <button className="primary-button" type="button" onClick={() => { void extractAll() }} disabled={!pendingCount || processing}>{processing ? <><span className="spinner"/> Extracting {completeCount} of {items.length}</> : <><Icon name="scan"/> Extract All{pendingCount ? ` (${pendingCount})` : ''} <Icon name="arrow"/></>}</button>
         </section>
         <section className="panel result-panel" aria-labelledby="result-title">
-          <div className="panel-heading"><div><span className="step">02</span><h2 id="result-title">Extracted text</h2></div><span className={`status-pill status-${status}`}>{status === 'working' ? 'Processing' : status === 'success' ? 'Ready' : status === 'empty' ? 'No text' : status === 'error' ? 'Needs attention' : 'Waiting'}</span></div>
-          <div className="result-body"><textarea ref={textArea} aria-label="Extracted text, editable" placeholder="Your extracted text will appear here…" value={text} onChange={(event) => { setText(event.target.value); setCopied(false); if (event.target.value && status !== 'working') setStatus('success') }} spellCheck={false}/>{status === 'working' && <div className="progress-track" role="progressbar" aria-label="OCR progress" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}><div style={{ width: `${progress}%` }}/></div>}</div>
-          <div className={`status-message ${status}`} role="status" aria-live="polite">{status === 'success' && <Icon name="check"/>}<span>{message}</span></div>
-          <div className="result-footer"><span className="char-count">{text.length.toLocaleString()} characters</span><div className="result-actions"><button className="icon-button" type="button" onClick={clear} disabled={!image && !text && status === 'idle'}><Icon name="trash"/> Clear</button><button className="copy-button" type="button" onClick={copyText} disabled={!text}><Icon name={copied ? 'check' : 'copy'}/>{copied ? 'Copied!' : 'Copy Text'}</button></div></div>
+          <div className="panel-heading"><div><span className="step">02</span><h2 id="result-title">Extracted text</h2></div><span className={`status-pill status-${selected?.status ?? 'pending'}`}>{selected?.status === 'processing' ? 'Processing' : selected?.status === 'success' ? 'Ready' : selected?.status === 'empty' ? 'No text' : selected?.status === 'error' ? 'Needs attention' : 'Waiting'}</span></div>
+          {selected && <div className="result-file"><Icon name="image"/><span title={selected.file.name}>{selected.file.name}</span><span>{items.findIndex((item) => item.id === selected.id) + 1} of {items.length}</span></div>}
+          <div className="result-body"><textarea aria-label="Extracted text, editable" placeholder={selected ? 'Text for this image will appear here...' : 'Choose an image to see its text...'} value={selected?.text ?? ''} onChange={(event) => { if (selected) { updateItem(selected.id, { text: event.target.value, status: event.target.value ? 'success' : 'empty', error: undefined }); setCopied(null) } }} disabled={!selected || selected.status === 'processing'} spellCheck={false}/>{selected?.status === 'processing' && <div className="progress-track" role="progressbar" aria-label="OCR progress" aria-valuenow={selected.progress} aria-valuemin={0} aria-valuemax={100}><div style={{ width: `${selected.progress}%` }}/></div>}</div>
+          <div className={`status-message ${selected?.status ?? 'pending'}`} role="status" aria-live="polite">{selected?.status === 'success' && <Icon name="check"/>}<span>{selected?.error ?? (selected?.status === 'empty' ? 'No text found. Try a clearer image.' : selected?.status === 'success' ? 'Edit this result before copying, if needed.' : notice)}</span></div>
+          <div className="result-footer"><span className="char-count">{(selected?.text.length ?? 0).toLocaleString()} characters</span><div className="result-actions">{selected?.status === 'error' && <button className="icon-button" type="button" onClick={retrySelected} disabled={processing}>Retry</button>}<button className="icon-button" type="button" onClick={clearAll} disabled={!items.length}><Icon name="trash"/> Clear All</button><button className="copy-button" type="button" onClick={() => copyValue(selected?.text ?? '', 'single')} disabled={!selected?.text}><Icon name={copied === 'single' ? 'check' : 'copy'}/>{copied === 'single' ? 'Copied!' : 'Copy Text'}</button></div></div>
+          <button className="copy-all-button" type="button" onClick={() => copyValue(combinedText, 'all')} disabled={!combinedText}><Icon name={copied === 'all' ? 'check' : 'copy'}/>{copied === 'all' ? 'Copied all!' : 'Copy All Results'}</button>
         </section>
       </div>
-      <div className="privacy-note"><span className="privacy-icon">✦</span><span>Your image stays on your device. Text extraction runs locally in your browser.</span></div>
+      <div className="privacy-note"><span className="privacy-icon">✦</span><span>Your images stay on your device. Text extraction runs locally in your browser.</span></div>
     </main>
     <footer className="footer"><span>Lens Text</span><span>Made for the words you need.</span></footer>
   </div>

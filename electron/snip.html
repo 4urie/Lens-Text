@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'self'; script-src 'self'">
+  <title>Select screen area — Lens Text</title>
+  <link rel="stylesheet" href="./snip.css">
+</head>
+<body>
+  <main id="snip-surface" aria-label="Select an area of the screen">
+    <img id="screen-image" alt="">
+    <div id="shade"></div>
+    <div id="selection" hidden></div>
+    <div id="toolbar"><span>Drag to select text on your screen</span><button id="cancel" type="button">Cancel · Esc</button></div>
+    <div id="status" role="status" aria-live="polite"></div>
+  </main>
+  <script src="./snip.js"></script>
+</body>
+</html>
