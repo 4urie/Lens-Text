@@ -8,14 +8,15 @@
   "scripts": {
     "prepare:ocr": "node scripts/copy-ocr-assets.cjs",
     "predev": "npm run prepare:ocr",
-    "dev": "vite",
+    "dev": "concurrently -k \"node server/index.cjs\" \"vite\"",
     "dev:desktop": "npm run prepare:ocr && concurrently -k \"vite --port 5175 --strictPort\" \"wait-on http://localhost:5175 && cross-env VITE_DEV_SERVER_URL=http://localhost:5175 electron .\"",
     "prebuild": "npm run prepare:ocr",
     "build": "tsc -b && vite build",
     "desktop": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win nsis",
-    "lint": "oxlint src electron scripts vite.config.ts",
-    "preview": "vite preview"
+    "lint": "oxlint src electron server scripts vite.config.ts",
+    "preview": "vite preview",
+    "serve:web": "node server/index.cjs"
   },
   "dependencies": {
     "react": "^19.2.8",
@@ -46,6 +47,7 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "server/deepseek.cjs",
       "package.json"
     ],
     "win": {

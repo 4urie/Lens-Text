@@ -1,6 +1,7 @@
 const { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, net, protocol, screen } = require('electron')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const { askDeepSeek } = require('../server/deepseek.cjs')
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
@@ -120,6 +121,10 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle('ai:ask', (event, input) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('Unavailable.')
+    return askDeepSeek(input)
+  })
   ipcMain.handle('snip:start', (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'Unavailable.' }
     return startSnip()

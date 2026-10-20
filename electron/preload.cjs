@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('lensTextDesktop', {
+  askAi: (input) => ipcRenderer.invoke('ai:ask', input),
   startSnip: () => ipcRenderer.invoke('snip:start'),
   shortcutStatus: () => ipcRenderer.invoke('snip:shortcut-status'),
   onCapture: (callback) => {

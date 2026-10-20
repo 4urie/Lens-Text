@@ -1,23 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createWorker, type Worker as OcrWorker } from 'tesseract.js'
+import { createSession, openSession, type SessionItem } from './session'
 import './App.css'
 
-type ItemStatus = 'pending' | 'processing' | 'success' | 'empty' | 'error'
-type ImageItem = {
-  id: number
-  file: File
+type ImageItem = SessionItem & {
   url: string
-  text: string
-  status: ItemStatus
   progress: number
-  error?: string
 }
 
 const supported = new Set(['image/png', 'image/jpeg', 'image/webp'])
 const ocrAssets = new URL(`${import.meta.env.BASE_URL}ocr/`, window.location.href).href.replace(/\/$/, '')
 
-function Icon({ name }: { name: 'scan' | 'upload' | 'paste' | 'copy' | 'trash' | 'sun' | 'moon' | 'image' | 'check' | 'arrow' | 'close' }) {
+function Icon({ name }: { name: 'scan' | 'upload' | 'paste' | 'copy' | 'trash' | 'sun' | 'moon' | 'image' | 'check' | 'arrow' | 'close' | 'save' | 'open' | 'search' | 'globe' }) {
   const paths = {
+    search: <><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></>,
+    globe: <><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></>,
     scan: <path d="M4 9V6a2 2 0 0 1 2-2h3m6 0h3a2 2 0 0 1 2 2v3m0 6v3a2 2 0 0 1-2 2h-3m-6 0H6a2 2 0 0 1-2-2v-3M7 12h10M7 15h7"/>,
     upload: <path d="M12 16V4m0 0L8 8m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>,
     paste: <><rect x="6" y="5" width="14" height="16" rx="2"/><path d="M9 5V3h8v2M9 10h8m-8 4h6M4 9H3v10a2 2 0 0 0 2 2"/></>,
@@ -29,6 +26,8 @@ function Icon({ name }: { name: 'scan' | 'upload' | 'paste' | 'copy' | 'trash' |
     check: <path d="m5 12 4 4L19 6"/>,
     arrow: <path d="M5 12h14m-6-6 6 6-6 6"/>,
     close: <path d="M5 5 19 19M19 5 5 19"/>,
+    save: <><path d="M4 4h13l3 3v13H4z"/><path d="M8 4v6h8V4M8 20v-7h8v7"/></>,
+    open: <><path d="M4 8V5a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v1"/><path d="M3 10h18l-2 10H5z"/></>,
   }
   return <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
@@ -45,15 +44,27 @@ function App() {
   const [dragging, setDragging] = useState(false)
   const [shortcutAvailable, setShortcutAvailable] = useState(false)
   const [notice, setNotice] = useState('Add images to start extracting text.')
+  const [sessionBusy, setSessionBusy] = useState<'saving' | 'opening' | null>(null)
+  const [sessionMessage, setSessionMessage] = useState('')
+  const [aiQuestion, setAiQuestion] = useState('')
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiResult, setAiResult] = useState<{ answer: string; sources: { title: string; url: string }[] } | null>(null)
+  const [aiError, setAiError] = useState('')
   const [copied, setCopied] = useState<'single' | 'all' | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const sessionInput = useRef<HTMLInputElement>(null)
   const workerRef = useRef<OcrWorker | null>(null)
+  const processingRef = useRef(false)
   const runId = useRef(0)
   const nextId = useRef(1)
   const autoSnipIds = useRef<number[]>([])
+  const aiRequestId = useRef(0)
   const mounted = useRef(true)
 
   const commitItems = useCallback((next: ImageItem[]) => {
+    aiRequestId.current += 1
+    setAiResult(null)
+    setAiError('')
     itemsRef.current = next
     setItems(next)
   }, [])
@@ -83,6 +94,7 @@ function App() {
     workerRef.current = null
     if (worker) void worker.terminate().catch(() => {})
     commitItems(itemsRef.current.map((item) => item.status === 'processing' ? { ...item, status: 'pending', progress: 0 } : item))
+    processingRef.current = false
     setProcessing(false)
   }, [commitItems])
 
@@ -201,11 +213,67 @@ function App() {
     if (fileInput.current) fileInput.current.value = ''
   }
 
+  const saveSession = async () => {
+    if (!itemsRef.current.length || processing || sessionBusy) return
+    setSessionBusy('saving')
+    setSessionMessage('Saving session...')
+    try {
+      const file = await createSession(itemsRef.current, selectedId)
+      const url = URL.createObjectURL(file)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `Lens Text session ${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      setSessionMessage('Session saved. Keep the downloaded file to reopen it later.')
+    } catch (error) {
+      console.error('Could not save session:', error)
+      setSessionMessage('Could not save the session. Please try again.')
+    } finally {
+      setSessionBusy(null)
+    }
+  }
+
+  const loadSession = async (file: File) => {
+    if (processing || sessionBusy) return
+    setSessionBusy('opening')
+    setSessionMessage('Opening session...')
+    try {
+      const restored = await openSession(file)
+      if (itemsRef.current.length && !window.confirm('Replace the current images and results with this saved session?')) {
+        setSessionMessage('Open session canceled.')
+        return
+      }
+      const restoredItems: ImageItem[] = restored.items.map((item) => ({
+        ...item,
+        url: URL.createObjectURL(item.file),
+        progress: item.status === 'success' || item.status === 'empty' ? 100 : 0,
+      }))
+      stopOcr()
+      itemsRef.current.forEach((item) => URL.revokeObjectURL(item.url))
+      autoSnipIds.current = []
+      commitItems(restoredItems)
+      setSelectedId(restored.selectedId)
+      nextId.current = Math.max(0, ...restoredItems.map((item) => item.id)) + 1
+      setCopied(null)
+      setNotice(`Opened session with ${restoredItems.length} image${restoredItems.length === 1 ? '' : 's'}.`)
+      setSessionMessage(`Opened session with ${restoredItems.length} image${restoredItems.length === 1 ? '' : 's'}.`)
+    } catch (error) {
+      console.error('Could not open session:', error)
+      setSessionMessage(error instanceof Error ? error.message : 'Could not open this session.')
+    } finally {
+      setSessionBusy(null)
+    }
+  }
+
   const extractAll = useCallback(async (onlyIds?: number[]) => {
-    if (processing) return
+    if (processingRef.current) return
     const queue = itemsRef.current.filter((item) => (item.status === 'pending' || item.status === 'error') && (!onlyIds || onlyIds.includes(item.id)))
     if (!queue.length) return
     const thisRun = ++runId.current
+    processingRef.current = true
     setProcessing(true)
     setCopied(null)
     setNotice(`Preparing OCR for ${queue.length} image${queue.length === 1 ? '' : 's'}...`)
@@ -264,9 +332,12 @@ function App() {
         if (workerRef.current === worker) workerRef.current = null
         try { await worker.terminate() } catch { /* Clear may already have stopped it. */ }
       }
-      if (mounted.current && runId.current === thisRun) setProcessing(false)
+      if (mounted.current && runId.current === thisRun) {
+        processingRef.current = false
+        setProcessing(false)
+      }
     }
-  }, [processing, updateItem, commitItems])
+  }, [updateItem, commitItems])
 
   useEffect(() => {
     if (processing || !autoSnipIds.current.length) return
@@ -311,6 +382,31 @@ function App() {
   const completeCount = items.filter((item) => item.status === 'success' || item.status === 'empty').length
   const combinedText = items.filter((item) => item.text.trim()).map((item) => `${item.file.name}\n${item.text.trim()}`).join('\n\n')
 
+  const askAi = async () => {
+    const question = aiQuestion.trim()
+    if (!question || aiBusy) return
+    const requestId = ++aiRequestId.current
+    setAiBusy(true)
+    setAiResult(null)
+    setAiError('')
+    try {
+      const input = { question, extractedText: combinedText.slice(0, 40000), mode: 'web' as const }
+      const response = window.lensTextDesktop
+        ? await window.lensTextDesktop.askAi(input)
+        : await fetch('/api/ai/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+          .then(async (result) => {
+            const data = await result.json()
+            if (!result.ok) throw new Error(data.error || 'Could not answer the question.')
+            return data as { answer: string; sources: { title: string; url: string }[] }
+          })
+      if (aiRequestId.current === requestId) setAiResult(response)
+    } catch (error) {
+      if (aiRequestId.current === requestId) setAiError(error instanceof Error ? error.message : 'Could not answer the question.')
+    } finally {
+      setAiBusy(false)
+    }
+  }
+
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand"><span className="brand-mark"><Icon name="scan"/></span><span>Lens <strong>Text</strong></span></div>
@@ -322,13 +418,14 @@ function App() {
         <section className="panel source-panel" aria-labelledby="source-title">
           <div className="panel-heading"><div><span className="step">01</span><h2 id="source-title">Source images</h2></div><span className="panel-hint">PNG, JPG, WebP</span></div>
           <input ref={fileInput} className="sr-only" type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(event) => { addImages(Array.from(event.target.files ?? [])); event.target.value = '' }} aria-label="Choose images" />
+          <input ref={sessionInput} className="sr-only" type="file" accept=".json,application/json" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void loadSession(file) }} aria-label="Open saved session" />
           <div className={`drop-zone ${dragging ? 'dragging' : ''} ${selected ? 'has-image' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true) }} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={(event) => { event.preventDefault(); if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }} onDrop={(event) => { event.preventDefault(); setDragging(false); addImages(Array.from(event.dataTransfer.files)) }}>
             {selected ? <img src={selected.url} className="preview" alt={`Preview of ${selected.file.name}`} onError={() => updateItem(selected.id, { status: 'error', error: 'This image could not be opened. Remove it and try another file.' })} /> : <div className="empty-upload"><div className="upload-icon"><Icon name="image"/></div><h3>Drop your images here</h3><p>or choose files to get started</p><button className="secondary-button choose-button" type="button" onClick={() => fileInput.current?.click()}><Icon name="upload"/> Browse files</button></div>}
             {dragging && <div className="drop-overlay">Drop images here</div>}
           </div>
           <div className="source-actions"><button className="secondary-button" type="button" onClick={() => fileInput.current?.click()}><Icon name="upload"/> Add images</button><button className="secondary-button" type="button" onClick={pasteImages}><Icon name="paste"/> Paste image</button>{window.lensTextDesktop && <button className="secondary-button snip-button" type="button" onClick={() => { void startScreenSnip() }}><Icon name="scan"/> Screen Snip</button>}</div>
-          <p className="shortcut-note">{window.lensTextDesktop ? <>Select an area with Screen Snip{shortcutAvailable ? <> or press <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> anywhere.</> : <>. The global shortcut may be in use by another app.</>}</> : <>Tip: Select several files at once, drop a group, or press <kbd>Ctrl</kbd> + <kbd>V</kbd> to add a screenshot.</>}</p>
-          {items.length > 0 && <div className="image-list" aria-label="Images to extract">
+          <button className="primary-button" type="button" onClick={() => { void extractAll() }} aria-busy={processing} disabled={!pendingCount || processing || !!sessionBusy}>{processing ? <><span className="spinner"/> Extracting {completeCount} of {items.length}</> : items.length > 0 && !pendingCount ? <><Icon name="check"/> Extraction complete</> : <><Icon name="scan"/> Extract All{pendingCount ? ` (${pendingCount})` : ''} <Icon name="arrow"/></>}</button>
+          {items.length > 0 && <div className="image-list" role="region" tabIndex={0} aria-label="Images to extract">
             <div className="list-heading"><strong>{items.length} image{items.length === 1 ? '' : 's'}</strong><span>{completeCount} completed</span></div>
             {items.map((item, index) => <div className={`image-row ${selectedId === item.id ? 'selected' : ''}`} key={item.id}>
               <button type="button" className="image-select" onClick={() => setSelectedId(item.id)} aria-label={`View result for ${item.file.name}`} aria-current={selectedId === item.id ? 'true' : undefined}>
@@ -338,10 +435,12 @@ function App() {
               <button className="remove-button" type="button" onClick={() => removeItem(item.id)} aria-label={`Remove ${item.file.name}`} title="Remove image"><Icon name="close"/></button>
             </div>)}
           </div>}
-          <button className="primary-button" type="button" onClick={() => { void extractAll() }} disabled={!pendingCount || processing}>{processing ? <><span className="spinner"/> Extracting {completeCount} of {items.length}</> : <><Icon name="scan"/> Extract All{pendingCount ? ` (${pendingCount})` : ''} <Icon name="arrow"/></>}</button>
+          <div className="session-actions" role="group" aria-label="Session actions"><button className="secondary-button" type="button" onClick={() => { void saveSession() }} disabled={!items.length || processing || !!sessionBusy}><Icon name="save"/> {sessionBusy === 'saving' ? 'Saving...' : 'Save Session'}</button><button className="secondary-button" type="button" onClick={() => sessionInput.current?.click()} disabled={processing || !!sessionBusy}><Icon name="open"/> {sessionBusy === 'opening' ? 'Opening...' : 'Open Session'}</button></div>
+          {sessionMessage && <p className="session-message" role="status">{sessionMessage}</p>}
+          <p className="shortcut-note">{window.lensTextDesktop ? <>Select an area with Screen Snip{shortcutAvailable ? <> or press <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> anywhere.</> : <>. The global shortcut may be in use by another app.</>}</> : <>Tip: Select several files at once, drop a group, or press <kbd>Ctrl</kbd> + <kbd>V</kbd> to add a screenshot.</>}</p>
         </section>
         <section className="panel result-panel" aria-labelledby="result-title">
-          <div className="panel-heading"><div><span className="step">02</span><h2 id="result-title">Extracted text</h2></div><span className={`status-pill status-${selected?.status ?? 'pending'}`}>{selected?.status === 'processing' ? 'Processing' : selected?.status === 'success' ? 'Ready' : selected?.status === 'empty' ? 'No text' : selected?.status === 'error' ? 'Needs attention' : 'Waiting'}</span></div>
+          <div className="panel-heading"><div><span className="step">02</span><h2 id="result-title">Extracted text</h2></div><span className={`status-pill status-${processing ? 'processing' : selected?.status ?? 'pending'}`}>{processing ? 'Processing' : selected?.status === 'success' ? 'Ready' : selected?.status === 'empty' ? 'No text' : selected?.status === 'error' ? 'Needs attention' : 'Waiting'}</span></div>
           {selected && <div className="result-file"><Icon name="image"/><span title={selected.file.name}>{selected.file.name}</span><span>{items.findIndex((item) => item.id === selected.id) + 1} of {items.length}</span></div>}
           <div className="result-body"><textarea aria-label="Extracted text, editable" placeholder={selected ? 'Text for this image will appear here...' : 'Choose an image to see its text...'} value={selected?.text ?? ''} onChange={(event) => { if (selected) { updateItem(selected.id, { text: event.target.value, status: event.target.value ? 'success' : 'empty', error: undefined }); setCopied(null) } }} disabled={!selected || selected.status === 'processing'} spellCheck={false}/>{selected?.status === 'processing' && <div className="progress-track" role="progressbar" aria-label="OCR progress" aria-valuenow={selected.progress} aria-valuemin={0} aria-valuemax={100}><div style={{ width: `${selected.progress}%` }}/></div>}</div>
           <div className={`status-message ${selected?.status ?? 'pending'}`} role="status" aria-live="polite">{selected?.status === 'success' && <Icon name="check"/>}<span>{selected?.error ?? (selected?.status === 'empty' ? 'No text found. Try a clearer image.' : selected?.status === 'success' ? 'Edit this result before copying, if needed.' : notice)}</span></div>
@@ -349,7 +448,29 @@ function App() {
           <button className="copy-all-button" type="button" onClick={() => copyValue(combinedText, 'all')} disabled={!combinedText}><Icon name={copied === 'all' ? 'check' : 'copy'}/>{copied === 'all' ? 'Copied all!' : 'Copy All Results'}</button>
         </section>
       </div>
-      <div className="privacy-note"><span className="privacy-icon">✦</span><span>Your images stay on your device. Text extraction runs locally in your browser.</span></div>
+      <section className="ai-panel ai-web" aria-labelledby="ai-title">
+        <div className="ai-heading"><span className="ai-heading-icon"><Icon name="globe"/></span><div><span className="ai-eyebrow">SEARCH THE WEB</span><h3 id="ai-title">Web search</h3></div></div>
+        <p>Explore any topic with an AI answer and web sources. Add a scan for extra context.</p>
+        <div className="ai-context"><span className={`badge-dot ${combinedText ? 'is-ready' : ''}`}/>{combinedText ? `${items.filter((item) => item.text.trim()).length} scan${items.filter((item) => item.text.trim()).length === 1 ? '' : 's'} added as context` : 'Ready to search. Scan context is optional.'}</div>
+        <label className="ai-label" htmlFor="ai-question">What would you like to explore?</label>
+        <div className="ai-composer">
+          <textarea id="ai-question" className="ai-question" value={aiQuestion} maxLength={1000} disabled={aiBusy} aria-describedby="ai-input-hint" onChange={(event) => setAiQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) { event.preventDefault(); void askAi() } }} placeholder="Name a topic or ask a specific question..." rows={3}/>
+          <div className="ai-composer-footer"><span id="ai-input-hint">Ctrl / Cmd + Enter to ask</span><span>{aiQuestion.length}/1,000</span></div>
+        </div>
+        {combinedText && <div className="ai-suggestions"><span>Try</span>{['Search this', 'Look up'].map((prompt) => <button key={prompt} type="button" disabled={!combinedText || aiBusy} onClick={() => { setAiQuestion(prompt); document.getElementById('ai-question')?.focus() }}>{prompt === 'Search this' ? 'Search this topic' : 'Find related sources'}<Icon name="arrow"/></button>)}</div>}
+        {combinedText.length > 40000 && <p className="ai-limit">Only the first 40,000 characters will be sent.</p>}
+        <button className="ai-ask-button" type="button" onClick={() => { void askAi() }} disabled={!aiQuestion.trim() || aiBusy}>{aiBusy ? <><span className="spinner"/>Working on your answer...</> : <><Icon name="search"/>Search and answer<Icon name="arrow"/></>}</button>
+        <div role="status" aria-live="polite">{aiBusy && <p className="ai-loading">Searching the web and preparing an answer. This may take a moment.</p>}</div>
+        {aiError && <p className="ai-error" role="alert">{aiError}</p>}
+        {aiResult && <div className="ai-response" aria-live="polite">
+          <div className="ai-answer-heading"><strong>Search answer</strong><span>DeepSeek Flash</span></div>
+          <p>{aiResult.answer}</p>
+          {aiResult.sources.length > 0 && <div className="ai-sources"><div className="ai-sources-heading"><strong>Explore the sources</strong><span>{aiResult.sources.length} links</span></div><ol>{aiResult.sources.map((source, index) => <li key={`${source.url}-${index}`}><a href={source.url} target="_blank" rel="noopener noreferrer"><span className="ai-source-number">{index + 1}</span><span className="ai-source-text"><strong>{source.title}</strong><span>{source.url}</span></span><Icon name="arrow"/><span className="sr-only"> (opens in a new tab)</span></a></li>)}</ol></div>}
+          {aiResult.sources.length === 0 && <p className="ai-no-sources">No web sources were returned for this search.</p>}
+        </div>}
+        <p className="ai-privacy">Only extracted text and your question are sent to DeepSeek. Your images stay on this device.</p>
+      </section>
+      <div className="privacy-note"><span className="privacy-icon">✦</span><span>Images stay on your device. OCR runs locally; AI questions send extracted text to DeepSeek.</span></div>
     </main>
     <footer className="footer"><span>Lens Text</span><span>Made for the words you need.</span></footer>
   </div>
